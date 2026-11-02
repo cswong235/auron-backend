@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS monthly_plans(
     month DATE NOT NULL,
     allowance_input_amount NUMERIC(12,2) NOT NULL,
     allowance_input_currency CHAR(3) NOT NULL,
-    allowance_in_default_currency NUMERIC(12,2) NOT NULL,
+    allowance_myr NUMERIC(12,2) NOT NULL,
     carry_in_debt NUMERIC(12,2) NOT NULL DEFAULT 0,
     carry_out_debt NUMERIC(12,2) NOT NULL DEFAULT 0,
     budget_mode VARCHAR(10) NOT NULL,
@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS monthly_plans(
     CONSTRAINT chk_month_first_day CHECK (EXTRACT(DAY FROM month) = 1),
     CONSTRAINT chk_budget_mode CHECK (budget_mode IN ('auto', 'manual')),
     CONSTRAINT chk_plan_amounts CHECK (
-        allowance_input_amount >= 0 AND allowance_in_default_currency >= 0
+        allowance_input_amount >= 0 AND allowance_myr >= 0
         AND carry_in_debt >= 0 AND carry_out_debt >= 0 AND daily_amount >= 0
     ),
     CONSTRAINT unique_user_month UNIQUE (user_id, month)
@@ -104,14 +104,14 @@ CREATE TABLE IF NOT EXISTS expenses(
     description TEXT,
     input_amount NUMERIC(12,2) NOT NULL,
     input_currency CHAR(3) NOT NULL,
-    amount_in_default_currency NUMERIC(12,2) NOT NULL,
+    amount_myr NUMERIC(12,2) NOT NULL,
     deduction_option VARCHAR(10) NOT NULL,
     overspend_option VARCHAR(10) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     deleted_at TIMESTAMP WITH TIME ZONE,
 
-    CONSTRAINT chk_expense_amounts CHECK (input_amount > 0 AND amount_in_default_currency > 0),
+    CONSTRAINT chk_expense_amounts CHECK (input_amount > 0 AND amount_myr > 0),
     CONSTRAINT chk_deduction_option CHECK (deduction_option IN ('today', 'spread')),
     CONSTRAINT chk_overspend_option CHECK (overspend_option IN ('next_day', 'spread'))
 );
@@ -125,12 +125,12 @@ CREATE TABLE IF NOT EXISTS incomes(
     description TEXT,
     input_amount NUMERIC(12,2) NOT NULL,
     input_currency CHAR(3) NOT NULL,
-    amount_in_default_currency NUMERIC(12,2) NOT NULL,
+    amount_myr NUMERIC(12,2) NOT NULL,
     distribution VARCHAR(10) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 
-    CONSTRAINT chk_income_amounts CHECK (input_amount > 0 AND amount_in_default_currency > 0),
+    CONSTRAINT chk_income_amounts CHECK (input_amount > 0 AND amount_myr > 0),
     CONSTRAINT chk_distribution CHECK (distribution IN ('today', 'spread', 'wishlist'))
 );
 
@@ -148,14 +148,14 @@ CREATE TABLE IF NOT EXISTS wishlist_items(
     desirability SMALLINT NOT NULL,
     affordable_notified BOOLEAN NOT NULL DEFAULT FALSE,
     purchased_at TIMESTAMP WITH TIME ZONE,
-    purchase_amount_in_default_currency NUMERIC(12,2),
+    purchase_amount_myr NUMERIC(12,2),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT chk_wishlist_price CHECK (input_amount > 0),
     CONSTRAINT chk_desirability CHECK (desirability BETWEEN 1 AND 4),
     CONSTRAINT chk_purchase_pair CHECK (
-        (purchased_at IS NULL) = (purchase_amount_in_default_currency IS NULL)
+        (purchased_at IS NULL) = (purchase_amount_myr IS NULL)
     )
 );
 
@@ -200,6 +200,8 @@ CREATE TABLE IF NOT EXISTS notifications(
     )
 );
 
+-- MYR is the pivot: 1 MYR = rate units of the currency.
+-- To MYR: amount / rate. From MYR: amount_myr * rate. Other pairs go through MYR
 CREATE TABLE IF NOT EXISTS exchange_rates(
     currency CHAR(3) PRIMARY KEY,
     rate NUMERIC(18,8) NOT NULL,
