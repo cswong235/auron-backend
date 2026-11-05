@@ -85,14 +85,16 @@ CREATE TABLE IF NOT EXISTS daily_budgets(
 CREATE TABLE IF NOT EXISTS categories(
     id SERIAL PRIMARY KEY,
     name VARCHAR(50) NOT NULL,
+    type VARCHAR(10) NOT NULL DEFAULT 'expense',
 
-    CONSTRAINT unique_category_name UNIQUE (name)
+    CONSTRAINT unique_category_name UNIQUE (name),
+    CONSTRAINT chk_category_type CHECK (type IN ('expense', 'income', 'both'))
 );
 
-INSERT INTO categories (name) VALUES
-    ('Food'), ('Transportation'), ('Entertainment'), ('Shopping'),
-    ('Bills'), ('Health'), ('Education'), ('Other'),
-    ('Salary'), ('Refund'), ('Sales')
+INSERT INTO categories (name, type) VALUES
+    ('Food', 'expense'), ('Transportation', 'expense'), ('Entertainment', 'expense'), ('Shopping', 'expense'),
+    ('Bills', 'expense'), ('Health', 'expense'), ('Education', 'expense'), ('Other', 'both'),
+    ('Salary', 'income'), ('Refund', 'income'), ('Sales', 'income')
 ON CONFLICT (name) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS expenses(
