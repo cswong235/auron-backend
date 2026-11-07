@@ -31,9 +31,17 @@ CREATE TABLE IF NOT EXISTS user_settings(
 
 CREATE OR REPLACE FUNCTION handle_new_user()
 RETURNS TRIGGER AS $$
+DECLARE
+    -- Cut to 41 characters so there's room for the extra 9 below, since usernames fit 50
+    new_username VARCHAR(50) := left(split_part(NEW.email, '@', 1), 41);
 BEGIN
+    -- If the username is taken, add part of the user's id to make it different
+    IF EXISTS (SELECT 1 FROM public.users WHERE username = new_username) THEN
+        new_username := new_username || '_' || left(NEW.id::text, 8);
+    END IF;
+
     INSERT INTO public.users (id, username)
-    VALUES (NEW.id, split_part(NEW.email, '@', 1));
+    VALUES (NEW.id, new_username);
     INSERT INTO public.user_settings (user_id)
     VALUES (NEW.id);
     RETURN NEW;

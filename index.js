@@ -392,6 +392,17 @@ function checkExpenseFields({ name, category_id, amount, currency, deduction_opt
     return null;
 }
 
+// Find the user's row for today
+async function findToday(userId){
+    const result = await pool.query(`
+        SELECT d.id, d.plan_id, to_char(d.date, 'YYYY-MM-DD') AS date, s.default_overspend
+        FROM daily_budgets d
+        JOIN user_settings s ON s.user_id = d.user_id
+        WHERE d.user_id = $1 AND d.date = (NOW() AT TIME ZONE s.timezone)::date
+    `, [userId]);
+    return result.rows[0];
+}
+
 // Apply an expense to the budget, or take it back off with a direction of -1
 async function applyExpense(planId, date, amountMyr, deductionOption, direction){
     if(deductionOption === 'today'){
@@ -403,8 +414,28 @@ async function applyExpense(planId, date, amountMyr, deductionOption, direction)
         return;
     }
 
-    // Split evenly across this day and the rest of the month, rounding down, then hand out
-    // the leftover cents one at a time to the first few days, like the monthly plan does
+    await spreadOverDays(planId, date, amountMyr, direction);
+}
+
+// Add an income to the budget, either on today or split across the rest of the month
+async function applyIncome(planId, date, amountMyr, distribution){
+    if(distribution === 'today'){
+        await pool.query(`
+            UPDATE daily_budgets
+            SET adjustment_total = adjustment_total + $1, updated_at = NOW()
+            WHERE plan_id = $2 AND date = $3
+        `, [amountMyr, planId, date]);
+        return;
+    }
+
+    await spreadOverDays(planId, date, amountMyr, -1);
+}
+
+// Spread an amount over this day and the rest of the month
+// A direction of 1 takes it off each day's budget, and -1 adds it on
+async function spreadOverDays(planId, date, amountMyr, direction){
+    // Split evenly, rounding down, then hand out the leftover cents
+    // one at a time to the first few days
     const daysLeft = daysLeftInMonth(date);
     const amountCents = Math.round(amountMyr * 100);
     const shareCents = Math.floor(amountCents / daysLeft);
@@ -472,16 +503,10 @@ app.post('/expenses', verifySession, async (req, res) => {
             return res.status(400).json({ error: `There's no exchange rate for ${currency} yet.` });
         }
 
-        const dayResult = await pool.query(`
-            SELECT d.id, d.plan_id, to_char(d.date, 'YYYY-MM-DD') AS date, s.default_overspend
-            FROM daily_budgets d
-            JOIN user_settings s ON s.user_id = d.user_id
-            WHERE d.user_id = $1 AND d.date = (NOW() AT TIME ZONE s.timezone)::date
-        `, [userId]);
-        if(dayResult.rows.length === 0){
+        const day = await findToday(userId);
+        if(!day){
             return res.status(400).json({ error: "There's no budget set up for today." });
         }
-        const day = dayResult.rows[0];
 
         if(deduction_option === 'spread' && daysLeftInMonth(day.date) === 1){
             return res.status(400).json({ error: "You can't redistribute a cost on the last day of the month." });
@@ -576,6 +601,107 @@ app.delete('/expenses/:id', verifySession, async (req, res) => {
     }
 });
 
+// Log an income on today
+app.post('/incomes', verifySession, async (req, res) => {
+    const userId = req.user.userId;
+    const { name, description, category_id, amount, currency, distribution } = req.body;
+
+    if(!name || !category_id || !amount || !currency || !distribution){
+        return res.status(400).json({ error: "One or some fields are empty." });
+    }
+    if(isNaN(amount) || Math.round(amount * 100) <= 0){
+        return res.status(400).json({ error: "Invalid amount." });
+    }
+
+    try{
+        const amountMyr = await convertToMyr(amount, currency);
+        if(amountMyr === null){
+            return res.status(400).json({ error: `There's no exchange rate for ${currency} yet.` });
+        }
+
+        const day = await findToday(userId);
+        if(!day){
+            return res.status(400).json({ error: "There's no budget set up for today." });
+        }
+
+        if(distribution === 'spread' && daysLeftInMonth(day.date) === 1){
+            return res.status(400).json({ error: "You can't distribute income on the last day of the month." });
+        }
+
+        const result = await pool.query(`
+            INSERT INTO incomes (user_id, day_id, category_id, name, description, input_amount,
+                input_currency, amount_myr, distribution)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING *
+        `, [userId, day.id, category_id, name, description || null, Math.round(amount * 100) / 100,
+            currency, amountMyr, distribution]);
+        await applyIncome(day.plan_id, day.date, amountMyr, distribution);
+
+        res.status(201).json({ message: "Income added", result: result.rows[0] });
+    }catch(err){
+        console.error(err);
+        res.status(500).json({ error: 'Something went wrong' });
+    }
+});
+
+// Get the latest rates from Frankfurter
+async function refreshRates(){
+    // Fetch currency rates from the database where the currency is NOT ringgit
+    // and at today's date
+    const fetchedToday = await pool.query(`
+        SELECT currency FROM exchange_rates
+        WHERE currency <> 'MYR' AND fetched_at::date = CURRENT_DATE
+        LIMIT 1
+    `);
+    if(fetchedToday.rows.length > 0){
+        return;
+    }
+
+    try{
+        const currencies = ['SGD', 'USD', 'EUR', 'GBP', 'JPY', 'CNY', 'AUD', 'IDR', 'THB'];
+
+        const response = await fetch(`https://api.frankfurter.dev/v1/latest?base=MYR&symbols=${currencies.join(',')}`);
+        const data = await response.json();
+
+        // Build one INSERT with a row of values per currency
+        // e.g. VALUES ($1, $2, $3), ($4, $5, $6), ...
+        const values = [];
+        const rows = [];
+        for(let i = 0; i < currencies.length; i++){
+            values.push(currencies[i], data.rates[currencies[i]], data.date);
+
+            const n = i * 3;
+            rows.push(`($${n + 1}, $${n + 2}, $${n + 3})`);
+        }
+
+        await pool.query(`
+            INSERT INTO exchange_rates (currency, rate, rate_date)
+            VALUES ${rows.join(', ')}
+            ON CONFLICT (currency) DO UPDATE
+            SET rate = EXCLUDED.rate, rate_date = EXCLUDED.rate_date, fetched_at = NOW()
+        `, values);
+    }catch(err){
+        console.error(err);
+    }
+}
+
+// Get the exchange rates
+// 1 MYR = rate units of each currency
+app.get('/exchange-rates', verifySession, async (req, res) => {
+    try{
+        await refreshRates();
+
+        const result = await pool.query(`
+            SELECT currency, rate, to_char(rate_date, 'YYYY-MM-DD') AS rate_date
+            FROM exchange_rates
+        `);
+        res.json(result.rows);
+    }catch(err){
+        console.error(err);
+        res.status(500).json({ error: "Something went wrong, please check back again later." });
+    }
+});
+
 app.post('/friendships', verifySession, async (req, res) => {
     // Select all friendships
     const { friend_id } = req.body;
@@ -609,9 +735,9 @@ app.get('/friendships', verifySession, async (req, res) => {
 app.patch('/friendships/:id', verifySession, async (req, res) => {
     const { status } = req.body;
 
-    // Only allow the frontend to accept or reject a request
-    if(!['accepted', 'rejected'].includes(status)){
-        return res.status(400).json({ error: "Status must be either 'accepted' or 'rejected'." });
+    // Only allow the frontend to accept or decline a request
+    if(!['accepted', 'declined'].includes(status)){
+        return res.status(400).json({ error: "Status must be either 'accepted' or 'declined'." });
     }
 
     try{
